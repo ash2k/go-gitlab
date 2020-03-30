@@ -18,7 +18,6 @@
 package gitlab
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -34,6 +33,7 @@ import (
 	"time"
 
 	"github.com/google/go-querystring/query"
+
 	"github.com/hashicorp/go-cleanhttp"
 	retryablehttp "github.com/hashicorp/go-retryablehttp"
 	"golang.org/x/oauth2"
@@ -416,6 +416,7 @@ type Client struct {
 	Snippets              *SnippetsService
 	SystemHooks           *SystemHooksService
 	Tags                  *TagsService
+	Terraform             *TerraformService
 	Todos                 *TodosService
 	Users                 *UsersService
 	Validate              *ValidateService
@@ -577,6 +578,7 @@ func newClient(httpClient *http.Client) *Client {
 	c.Snippets = &SnippetsService{client: c}
 	c.SystemHooks = &SystemHooksService{client: c}
 	c.Tags = &TagsService{client: c}
+	c.Terraform = &TerraformService{client: c}
 	c.Todos = &TodosService{client: c}
 	c.Users = &UsersService{client: c}
 	c.Validate = &ValidateService{client: c}
@@ -717,10 +719,12 @@ func (c *Client) configureLimiter() error {
 }
 
 // NewRequest creates an API request. A relative URL path can be provided in
-// urlStr, in which case it is resolved relative to the base URL of the Client.
-// Relative URL paths should always be specified without a preceding slash. If
-// specified, the value pointed to by body is JSON encoded and included as the
-// request body.
+// path, in which case it is resolved relative to the base URL of the Client.
+// Relative URL paths should always be specified without a preceding slash.
+// When method is POST or PUT:
+// - If opt is a []byte, it is used as request body as is.
+// - Otherwise, and if it's non-nil, it is JSON encoded first.
+// For other values of method, opt is encoded as query parameters in the URL.
 func (c *Client) NewRequest(method, path string, opt interface{}, options []OptionFunc) (*retryablehttp.Request, error) {
 	u := *c.baseURL
 	unescaped, err := url.PathUnescape(path)
@@ -732,13 +736,6 @@ func (c *Client) NewRequest(method, path string, opt interface{}, options []Opti
 	u.RawPath = c.baseURL.Path + path
 	u.Path = c.baseURL.Path + unescaped
 
-	if opt != nil {
-		q, err := query.Values(opt)
-		if err != nil {
-			return nil, err
-		}
-		u.RawQuery = q.Encode()
-	}
 	// Create a request specific headers map.
 	reqHeaders := make(http.Header)
 	reqHeaders.Set("Accept", "application/json")
@@ -756,16 +753,26 @@ func (c *Client) NewRequest(method, path string, opt interface{}, options []Opti
 
 	var body interface{}
 	if method == "POST" || method == "PUT" {
-		u.RawQuery = ""
-		reqHeaders.Set("Content-Type", "application/json")
-
-		if opt != nil {
+		switch typedOpt := opt.(type) {
+		case nil:
+			// no body
+		case []byte:
+			// caller controls the body and headers (e.g. Content-Type)
+			body = typedOpt
+		default:
+			reqHeaders.Set("Content-Type", "application/json")
 			bodyBytes, err := json.Marshal(opt)
 			if err != nil {
 				return nil, err
 			}
-			body = bytes.NewReader(bodyBytes)
+			body = bodyBytes
 		}
+	} else if opt != nil {
+		q, err := query.Values(opt)
+		if err != nil {
+			return nil, err
+		}
+		u.RawQuery = q.Encode()
 	}
 
 	req, err := retryablehttp.NewRequest(method, u.String(), body)
